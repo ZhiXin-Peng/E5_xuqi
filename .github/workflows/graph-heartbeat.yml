@@ -1,32 +1,33 @@
-name: Graph Heartbeat (OIDC - Dev Reads + Write + Summary)
+name: "Graph Heartbeat (OIDC - Dev Reads + Write + Summary)"
 
 on:
   push:
-    branches: [ main ]
+    branches: [ "main" ]
   schedule:
-    - cron: "7 2 * * 1,3,5"    # 每周一/三/五 02:07 UTC
+    - cron: "7 2 * * 1,3,5"     # 每周一/三/五 02:07 UTC
   workflow_dispatch: {}
 
 jobs:
   heartbeat:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write           # OIDC 必需
+      id-token: write            # OIDC 必需
       contents: read
 
     steps:
-      - uses: actions/checkout@v4
+      - name: "Checkout"
+        uses: actions/checkout@v4
 
       # --- OIDC 登录（无密钥） ---
-      - name: Azure login with OIDC
+      - name: "Azure login with OIDC"
         uses: azure/login@v2
         with:
-          client-id: da2d13f6-c585-4e42-8846-d182c26d6ef3     # 你的应用程序ID
-          tenant-id: e77be010-7134-4688-b3a1-63ebbdaafe4c     # 你的租户ID
+          client-id: da2d13f6-c585-4e42-8846-d182c26d6ef3     # 你的应用程序 ID
+          tenant-id: e77be010-7134-4688-b3a1-63ebbdaafe4c     # 你的租户 ID
           allow-no-subscriptions: true
 
       # --- 获取 Graph 令牌 ---
-      - name: Acquire Microsoft Graph token
+      - name: "Acquire Microsoft Graph token"
         id: graphtoken
         shell: bash
         run: |
@@ -36,53 +37,54 @@ jobs:
           echo "token=$AZ_TOKEN" >> "$GITHUB_OUTPUT"
 
       # --- 读 1：驱动器信息与配额 ---
-      - name: Read Drive info & quota
+      - name: "Read Drive info and quota"
         id: read_drive
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
-          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" \
-            https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive)
-          USED=$(echo "$RESP" | jq -r '.quota.used')
+          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive)
+          USED=$(echo "$RESP"  | jq -r '.quota.used')
           TOTAL=$(echo "$RESP" | jq -r '.quota.total')
-          echo "quota_used=${USED:-0}"  >> "$GITHUB_OUTPUT"
+          echo "quota_used=${USED:-0}"   >> "$GITHUB_OUTPUT"
           echo "quota_total=${TOTAL:-0}" >> "$GITHUB_OUTPUT"
+          echo "Drive quota: used=${USED:-0}, total=${TOTAL:-0}"
 
       # --- 读 2：最近文件（/recent） ---
-      - name: Read recent files
+      - name: "Read recent files"
         id: read_recent
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
-          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" \
-            https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/recent)
+          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/recent)
           echo "$RESP" | jq -r '.value[] | [.name, .lastModifiedDateTime] | @tsv' | head -n 10
           COUNT=$(echo "$RESP" | jq -r '.value | length')
           echo "recent_count=${COUNT:-0}" >> "$GITHUB_OUTPUT"
 
       # --- 读 3：增量变更（/delta） ---
-      - name: Read delta (changes)
+      - name: "Read delta (changes)"
         id: read_delta
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
-          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" \
-            "https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root/delta?top=10")
+          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root/delta?top=10")
           CHG=$(echo "$RESP" | jq -r '.value | length')
           DLT=$(echo "$RESP" | jq -r '."@odata.deltaLink" // empty')
           echo "delta_changes=${CHG:-0}" >> "$GITHUB_OUTPUT"
           if [ -n "$DLT" ]; then
             echo "delta_token_prefix=$(echo "$DLT" | head -c 48)" >> "$GITHUB_OUTPUT"
+            echo "Delta token prefix: $(echo "$DLT" | head -c 96)…"
+          else
+            echo "No delta token returned."
           fi
 
       # --- 写：上传心跳文件（把读到的指标写入内容） ---
-      - name: Write heartbeat file to OneDrive
+      - name: "Write heartbeat file to OneDrive"
         id: write
         env:
           TOKEN:       ${{ steps.graphtoken.outputs.token }}
@@ -108,8 +110,8 @@ jobs:
           echo "http_code=$CODE"    >> "$GITHUB_OUTPUT"
           [ "$CODE" -lt 300 ] || { echo "Upload failed with HTTP $CODE"; exit 1; }
 
-      # --- 摘要：写入 GitHub Step Summary（Markdown） ---
-      - name: Post run summary
+      # --- 摘要：写入 GitHub Step Summary（安全 printf，避免引号/缩进问题） ---
+      - name: "Post run summary"
         env:
           QUOTA_USED:   ${{ steps.read_drive.outputs.quota_used }}
           QUOTA_TOTAL:  ${{ steps.read_drive.outputs.quota_total }}
@@ -127,17 +129,16 @@ jobs:
           else
             STATUS="❌ Failure"
           fi
-          cat >> "$GITHUB_STEP_SUMMARY" <<EOF
-## Graph Heartbeat Summary (Dev Reads + Write)
 
-- **Run time**: ${NOW_UTC}
-- **Drive quota**: used=${QUOTA_USED:-0} total=${QUOTA_TOTAL:-0}
-- **Recent files count**: ${RECENT_CNT:-0}
-- **Delta changes (top)**: ${DELTA_CHG:-0}
-- **Delta token prefix**: ${DELTA_PREFIX:-(n/a)}
-- **Uploaded**: ${FILE_NAME:-(unknown)}
-- **HTTP code**: ${HTTP_CODE:-(n/a)}
-- **Result**: ${STATUS}
-
-> Performed 3 read ops (drive info, recent, delta) and 1 write op (upload heartbeat) via Microsoft Graph.
-EOF
+          {
+            printf '## Graph Heartbeat Summary (Dev Reads + Write)\n\n'
+            printf -- '- **Run time**: %s\n' "${NOW_UTC}"
+            printf -- '- **Drive quota**: used=%s total=%s\n' "${QUOTA_USED:-0}" "${QUOTA_TOTAL:-0}"
+            printf -- '- **Recent files count**: %s\n' "${RECENT_CNT:-0}"
+            printf -- '- **Delta changes (top)**: %s\n' "${DELTA_CHG:-0}"
+            printf -- '- **Delta token prefix**: %s\n' "${DELTA_PREFIX:-(n/a)}"
+            printf -- '- **Uploaded**: %s\n' "${FILE_NAME:-(unknown)}"
+            printf -- '- **HTTP code**: %s\n' "${HTTP_CODE:-(n/a)}"
+            printf -- '- **Result**: %s\n\n' "${STATUS}"
+            printf -- '> Performed 3 read ops (drive info, recent, delta) and 1 write op (upload heartbeat) via Microsoft Graph.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
