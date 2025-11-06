@@ -36,7 +36,7 @@ jobs:
           test -n "$AZ_TOKEN" || { echo "Failed to acquire Microsoft Graph token"; exit 1; }
           echo "token=$AZ_TOKEN" >> "$GITHUB_OUTPUT"
 
-      # --- 读 1：驱动器信息与配额 ---
+      # --- 读 1：驱动器信息与配额（app-only 可用） ---
       - name: "Read Drive info and quota"
         id: read_drive
         env:
@@ -51,20 +51,32 @@ jobs:
           echo "quota_total=${TOTAL:-0}" >> "$GITHUB_OUTPUT"
           echo "Drive quota: used=${USED:-0}, total=${TOTAL:-0}"
 
-      # --- 读 2：最近文件（/recent） ---
-      - name: "Read recent files"
+      # --- 读 2：最近修改的文件（children + $orderby，兼容 app-only） ---
+      - name: "Read most recently modified items"
         id: read_recent
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
         shell: bash
         run: |
           set -euo pipefail
-          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/recent)
-          echo "$RESP" | jq -r '.value[] | [.name, .lastModifiedDateTime] | @tsv' | head -n 10
-          COUNT=$(echo "$RESP" | jq -r '.value | length')
+          URL="https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root/children?\$orderby=lastModifiedDateTime%20desc&\$top=10"
+          RESP=$(curl -sS -w "\n%{http_code}" -H "Authorization: Bearer ${TOKEN}" "$URL")
+          CODE=$(echo "$RESP" | tail -n1)
+          BODY=$(echo "$RESP" | sed '$d')
+
+          echo "HTTP_CODE: $CODE"
+          if [ "$CODE" -ge 300 ]; then
+            echo "List failed. Body (truncated):"
+            echo "$BODY" | head -c 600; echo
+            echo "recent_count=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "$BODY" | jq -r '(.value // []) | .[] | [.name, .lastModifiedDateTime] | @tsv' | head -n 10
+          COUNT=$(echo "$BODY" | jq -r '(.value // []) | length')
           echo "recent_count=${COUNT:-0}" >> "$GITHUB_OUTPUT"
 
-      # --- 读 3：增量变更（/delta） ---
+      # --- 读 3：增量变更（/delta，健壮处理） ---
       - name: "Read delta (changes)"
         id: read_delta
         env:
@@ -73,7 +85,7 @@ jobs:
         run: |
           set -euo pipefail
           RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root/delta?top=10")
-          CHG=$(echo "$RESP" | jq -r '.value | length')
+          CHG=$(echo "$RESP" | jq -r '(.value // []) | length')
           DLT=$(echo "$RESP" | jq -r '."@odata.deltaLink" // empty')
           echo "delta_changes=${CHG:-0}" >> "$GITHUB_OUTPUT"
           if [ -n "$DLT" ]; then
@@ -110,7 +122,7 @@ jobs:
           echo "http_code=$CODE"    >> "$GITHUB_OUTPUT"
           [ "$CODE" -lt 300 ] || { echo "Upload failed with HTTP $CODE"; exit 1; }
 
-      # --- 摘要：写入 GitHub Step Summary（安全 printf，避免引号/缩进问题） ---
+      # --- 摘要：写入 GitHub Step Summary（安全 printf） ---
       - name: "Post run summary"
         env:
           QUOTA_USED:   ${{ steps.read_drive.outputs.quota_used }}
@@ -140,5 +152,5 @@ jobs:
             printf -- '- **Uploaded**: %s\n' "${FILE_NAME:-(unknown)}"
             printf -- '- **HTTP code**: %s\n' "${HTTP_CODE:-(n/a)}"
             printf -- '- **Result**: %s\n\n' "${STATUS}"
-            printf -- '> Performed 3 read ops (drive info, recent, delta) and 1 write op (upload heartbeat) via Microsoft Graph.\n'
+            printf -- '> Performed 3 read ops (drive info, ordered children, delta) and 1 write op (upload heartbeat) via Microsoft Graph.\n'
           } >> "$GITHUB_STEP_SUMMARY"
