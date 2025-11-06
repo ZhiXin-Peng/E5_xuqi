@@ -1,0 +1,64 @@
+name: OIDC Quick Check
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]   # 如用其他分支，请改&确保 Federated credential 也是这个分支
+
+jobs:
+  check-oidc:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets (redacted)
+        env:
+          HAS_TENANT: ${{ secrets.TENANT_ID != '' }}
+          HAS_CLIENT: ${{ secrets.CLIENT_ID != '' }}
+          TARGET_UPN: ${{ secrets.TARGET_UPN }}
+        run: |
+          echo "TENANT_ID set: ${HAS_TENANT}"
+          echo "CLIENT_ID set: ${HAS_CLIENT}"
+          echo "TARGET_UPN: ${TARGET_UPN:-'(empty)'}"
+          if [ "${HAS_TENANT}" != "true" ] || [ "${HAS_CLIENT}" != "true" ]; then
+            echo "Missing TENANT_ID or CLIENT_ID"; exit 1;
+          fi
+
+      - name: Azure login with OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.CLIENT_ID }}
+          tenant-id: ${{ secrets.TENANT_ID }}
+          allow-no-subscriptions: true
+
+      - name: Acquire Graph token via Azure CLI
+        id: graphtoken
+        run: |
+          set -euo pipefail
+          AZ_TOKEN=$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv)
+          test -n "$AZ_TOKEN" || { echo "Failed to get Graph token via OIDC"; exit 1; }
+          echo "token=$AZ_TOKEN" >> "$GITHUB_OUTPUT"
+
+      - name: PUT heartbeat to OneDrive
+        env:
+          TOKEN: ${{ steps.graphtoken.outputs.token }}
+          TARGET_UPN: ${{ secrets.TARGET_UPN }}
+        run: |
+          set -euo pipefail
+          TS=$(date -u +"%Y%m%d-%H%M%S")
+          CONTENT="GitHub OIDC heartbeat at ${TS} (commit ${GITHUB_SHA})"
+          URL="https://graph.microsoft.com/v1.0/users/${TARGET_UPN}/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content"
+          RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: text/plain" \
+            --data "${CONTENT}" \
+            "$URL")
+          CODE=$(echo "$RESP" | tail -n1)
+          BODY=$(echo "$RESP" | sed '$d')
+          echo "Upload HTTP_CODE: $CODE"
+          echo "$BODY" | head -c 600; echo
+          [ "$CODE" -lt 300 ] || { echo "Upload failed"; exit 1; }
