@@ -1,4 +1,4 @@
-name: "E5 Dev Activity (OIDC + Build + OneDrive + Teams)"
+name: "E5 Dev Activity (OIDC + Build + OneDrive/Dev-Heartbeat + Teams)"
 
 on:
   push:
@@ -15,24 +15,24 @@ jobs:
       contents: read
 
     env:
-      # 基本参数（按需修改）
-      UPN: "pzx@wzhmk.onmicrosoft.com"             # 目标 OneDrive 用户
+      # 目标 OneDrive 用户与 Azure 应用（按你之前提供的值）
+      UPN: "pzx@wzhmk.onmicrosoft.com"
       TENANT_ID: "e77be010-7134-4688-b3a1-63ebbdaafe4c"
       CLIENT_ID: "da2d13f6-c585-4e42-8846-d182c26d6ef3"
 
-      # 构建参数（示例为 Node；若非 Node 请改 BUILD_COMMAND 与 BUILD_OUTPUT_PATH）
+      # 构建参数（若不是 Node 项目，请改 BUILD_COMMAND 与 BUILD_OUTPUT_PATH）
       BUILD_COMMAND: "npm ci && npm run build"
       BUILD_OUTPUT_PATH: "dist"
       ARTIFACT_NAME: "build-output"
 
-      # 你的 Teams Webhook（按你提供的 URL 写死；推荐后续放到 Secret）
+      # 你的 Teams Webhook（建议后续放入 Secret：secrets.TEAMS_WEBHOOK_URL）
       TEAMS_WEBHOOK_URL: "https://wzhmk.webhook.office.com/webhookb2/6508d725-573a-4733-947d-a9cad095b53e@e77be010-7134-4688-b3a1-63ebbdaafe4c/IncomingWebhook/d10988c901f94ce6a9019626e1067528/868f8e01-61d3-4170-ae9d-aa301c782b7a/V2b4kxka0UIt78iSavnuZIwU8-9NOCvvjDqQG72UN_Ggk1"
 
     steps:
       - name: "Checkout"
         uses: actions/checkout@v4
 
-      # ---------- 可选：安装 Node（如不是 Node 项目可删除这两步并改 BUILD_COMMAND） ----------
+      # ---------- 可选：Node 项目示例 ----------
       - name: "Setup Node (optional)"
         uses: actions/setup-node@v4
         with:
@@ -48,6 +48,7 @@ jobs:
           else
             echo "No package.json found. Skipping build (customize BUILD_COMMAND if needed)."
           fi
+          # 确保产物目录存在，写入一条构建信息
           mkdir -p "${BUILD_OUTPUT_PATH}"
           echo "build-run: $(date -u)" > "${BUILD_OUTPUT_PATH}/_build_info.txt"
 
@@ -89,7 +90,7 @@ jobs:
           test -n "$AZ_TOKEN" || { echo "Failed to acquire Microsoft Graph token"; exit 1; }
           echo "token=$AZ_TOKEN" >> "$GITHUB_OUTPUT"
 
-      # ---------- 读：驱动器配额 ----------
+      # ---------- 读：驱动器配额（可选） ----------
       - name: "Read Drive quota"
         id: read_quota
         env:
@@ -105,8 +106,8 @@ jobs:
           echo "quota_total=${TOTAL:-0}" >> "$GITHUB_OUTPUT"
           echo "Drive quota: used=${USED:-0}, total=${TOTAL:-0}"
 
-      # ---------- 把构建 ZIP 上传到 OneDrive /Builds ----------
-      - name: "Upload build ZIP to OneDrive"
+      # ---------- 上传构建 ZIP 到 OneDrive /Dev-Heartbeat ----------
+      - name: "Upload build ZIP to OneDrive/Dev-Heartbeat"
         id: upload_zip
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
@@ -115,7 +116,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://graph.microsoft.com/v1.0/users/${UPN}/drive/root:/Builds/${ZIP}:/content"
+          URL="https://graph.microsoft.com/v1.0/users/${UPN}/drive/root:/Dev-Heartbeat/${ZIP}:/content"
           RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: application/zip" \
@@ -125,8 +126,8 @@ jobs:
           echo "zip_http_code=$CODE" >> "$GITHUB_OUTPUT"
           [ "$CODE" -lt 300 ] || { echo "Upload ZIP failed with HTTP $CODE"; exit 1; }
 
-      # ---------- 写：运行日志到 OneDrive /Dev-Logs ----------
-      - name: "Append run log to OneDrive"
+      # ---------- 写：本次运行日志也放到 OneDrive /Dev-Heartbeat ----------
+      - name: "Append run log to OneDrive/Dev-Heartbeat"
         id: run_log
         env:
           TOKEN:      ${{ steps.graphtoken.outputs.token }}
@@ -140,7 +141,7 @@ jobs:
           TS=$(date -u +"%Y%m%d-%H%M%S")
           LOGFILE="log-${TS}.txt"
           CONTENT=$'E5 Dev Activity Log\n'"timestamp=${TS}\ncommit=${GITHUB_SHA}\nzip=${ZIP_NAME}\nquota_used=${QUOTA_USED:-0}\nquota_total=${QUOTA_TOT:-0}"
-          URL="https://graph.microsoft.com/v1.0/users/${UPN}/drive/root:/Dev-Logs/${LOGFILE}:/content"
+          URL="https://graph.microsoft.com/v1.0/users/${UPN}/drive/root:/Dev-Heartbeat/${LOGFILE}:/content"
           RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: text/plain" \
@@ -150,11 +151,11 @@ jobs:
           echo "log_http_code=$CODE" >> "$GITHUB_OUTPUT"
           [ "$CODE" -lt 300 ] || { echo "Upload log failed with HTTP $CODE"; exit 1; }
 
-      # ---------- Teams 通知（使用你提供的 Webhook URL） ----------
+      # ---------- Teams 通知（Incoming Webhook；已修正 jq 条件表达式问题） ----------
       - name: "Notify Teams"
         if: always()   # 失败也通知
         env:
-          TEAMS_WEBHOOK_URL: ${{ env.TEAMS_WEBHOOK_URL }}
+          TEAMS_WEBHOOK_URL: ${{ env.TEAMS_WEBHOOK_URL }}   # 建议换成 secrets.TEAMS_WEBHOOK_URL
           RUN_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           ZIP_NAME: ${{ steps.pack.outputs.zip_name }}
           ZIP_CODE: ${{ steps.upload_zip.outputs.zip_http_code }}
@@ -170,16 +171,20 @@ jobs:
           if [ "${{ job.status }}" != "success" ]; then
             STATUS="Failed"
           fi
-          # 简洁 MessageCard（兼容 Incoming Webhook）
+          COLOR="2EB886"
+          if [ "$STATUS" = "Failed" ]; then
+            COLOR="E81123"
+          fi
           PAYLOAD=$(jq -n \
             --arg title "E5 Dev Activity: $STATUS" \
             --arg run   "$RUN_URL" \
             --arg zip   "$ZIP_NAME" \
             --arg zc    "${ZIP_CODE:-n/a}" \
             --arg lc    "${LOG_CODE:-n/a}" \
+            --arg color "$COLOR" \
             '{ "@type":"MessageCard", "@context":"https://schema.org/extensions",
                "summary": $title,
-               "themeColor": ( $title | contains("Failed") ? "E81123" : "2EB886"),
+               "themeColor": $color,
                "title": $title,
                "sections":[
                  { "facts":[
@@ -211,8 +216,8 @@ jobs:
             printf '## E5 Dev Activity Summary\n\n'
             printf -- '- **Run time**: %s\n' "${NOW_UTC}"
             printf -- '- **Artifact**: %s\n' "${ZIP_NAME}"
-            printf -- '- **OneDrive /Builds HTTP**: %s\n' "${ZIP_CODE:-n/a}"
-            printf -- '- **OneDrive /Dev-Logs HTTP**: %s\n' "${LOG_CODE:-n/a}"
+            printf -- '- **OneDrive Dev-Heartbeat (ZIP) HTTP**: %s\n' "${ZIP_CODE:-n/a}"
+            printf -- '- **OneDrive Dev-Heartbeat (LOG) HTTP**: %s\n' "${LOG_CODE:-n/a}"
             printf -- '- **Drive quota**: used=%s total=%s\n' "${QUOTA_USED:-0}" "${QUOTA_TOT:-0}"
             printf -- '- **Result**: %s\n' "${STATUS}"
           } >> "$GITHUB_STEP_SUMMARY"
