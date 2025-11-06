@@ -1,21 +1,30 @@
-name: Graph Heartbeat (Client Secret)
+name: Graph Heartbeat - DEBUG
 
 on:
+  workflow_dispatch: {}     # 手动运行
   push:
-    branches: [ main ]        # 提交到 main 时触发
-  schedule:
-    - cron: "7 2 * * 1"       # 每周一 02:07 UTC 定时触发（可改）
-  workflow_dispatch: {}        # 允许手动触发
+    branches: [ main ]      # 可选：推送也触发，便于复现
 
 jobs:
-  heartbeat:
+  debug-heartbeat:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 取得 Graph 访问令牌（鲁棒版，自动 URL 编码 & 打印错误原因）
-      - name: Get Graph token (client credentials, robust)
+      - name: Print basic env (redacted)
+        env:
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+          CLIENT_ID: ${{ secrets.CLIENT_ID }}
+          CLIENT_SECRET_SET: ${{ secrets.CLIENT_SECRET != '' }}
+          TARGET_UPN: ${{ secrets.TARGET_UPN }}
+        run: |
+          echo "TENANT_ID set: $([ -n "${TENANT_ID}" ] && echo yes || echo no)"
+          echo "CLIENT_ID set: $([ -n "${CLIENT_ID}" ] && echo yes || echo no)"
+          echo "CLIENT_SECRET set: ${CLIENT_SECRET_SET}"
+          echo "TARGET_UPN: ${TARGET_UPN:-"(empty -> will use /me)"}"
+
+      - name: Get Graph token (client credentials, verbose)
         id: token
         env:
           TENANT_ID: ${{ secrets.TENANT_ID }}
@@ -23,43 +32,77 @@ jobs:
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
         run: |
           set -euo pipefail
-          test -n "${TENANT_ID}" || { echo "TENANT_ID is empty"; exit 1; }
-          test -n "${CLIENT_ID}" || { echo "CLIENT_ID is empty"; exit 1; }
-          test -n "${CLIENT_SECRET}" || { echo "CLIENT_SECRET is empty"; exit 1; }
+          if [ -z "${CLIENT_SECRET:-}" ]; then
+            echo "CLIENT_SECRET is empty. If you intend to use OIDC, skip this job and use the OIDC workflow instead."
+            exit 1
+          fi
 
-          RESP=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+          echo "::group::cURL request to token endpoint"
+          # 使用 --data-urlencode，避免 secret 中的特殊字符导致 invalid_client
+          RESP=$(curl -sS -w "\n%{http_code}" -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
             -H "Content-Type: application/x-www-form-urlencoded" \
             --data-urlencode "client_id=${CLIENT_ID}" \
             --data-urlencode "client_secret=${CLIENT_SECRET}" \
             --data-urlencode "scope=https://graph.microsoft.com/.default" \
-            --data-urlencode "grant_type=client_credentials" || true)
+            --data-urlencode "grant_type=client_credentials")
+          echo "::endgroup::"
 
-          echo "Raw token endpoint response (truncated):"
-          echo "$RESP" | head -c 400; echo
+          # 拆分 body 与 http_code
+          HTTP_CODE=$(echo "$RESP" | tail -n1)
+          BODY=$(echo "$RESP" | sed '$d')
+          echo "Token HTTP_CODE: $HTTP_CODE"
+          echo "Token BODY (truncated):"
+          echo "$BODY" | head -c 800; echo
 
-          TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
-          if [ -z "$TOKEN" ]; then
-            ERR=$(echo "$RESP" | jq -r '.error // empty')
-            DESC=$(echo "$RESP" | jq -r '.error_description // empty')
-            echo "Failed to acquire token."
+          if [ "$HTTP_CODE" -ge 400 ]; then
+            echo "Failed to acquire token (HTTP $HTTP_CODE)."
+            # 打印标准错误字段
+            ERR=$(echo "$BODY" | jq -r '.error // empty')
+            DESC=$(echo "$BODY" | jq -r '.error_description // empty')
             [ -n "$ERR$DESC" ] && { echo "error: $ERR"; echo "error_description: $DESC"; }
             exit 1
           fi
 
+          TOKEN=$(echo "$BODY" | jq -r '.access_token // empty')
+          test -n "$TOKEN" || { echo "No access_token in response."; exit 1; }
           echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
 
-      # 往 OneDrive 写入心跳文件（自动创建 /Dev-Heartbeat/ 目录）
-      - name: Upload heartbeat file to OneDrive via Graph
+      - name: PUT heartbeat to OneDrive (users/{UPN} or /me)
+        id: putfile
         env:
           TOKEN: ${{ steps.token.outputs.token }}
-          TARGET_UPN: ${{ secrets.TARGET_UPN }}   # 形如 you@yourtenant.onmicrosoft.com
+          TARGET_UPN: ${{ secrets.TARGET_UPN }}
         run: |
           set -euo pipefail
           TS=$(date -u +"%Y%m%d-%H%M%S")
-          CONTENT="GitHub heartbeat at ${TS} (commit ${GITHUB_SHA})"
-          RES=$(curl -sS -X PUT \
+          CONTENT="GitHub heartbeat DEBUG at ${TS} (commit ${GITHUB_SHA})"
+          if [ -n "${TARGET_UPN:-}" ]; then
+            URL="https://graph.microsoft.com/v1.0/users/${TARGET_UPN}/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content"
+          else
+            URL="https://graph.microsoft.com/v1.0/me/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content"
+          fi
+
+          echo "::group::cURL PUT $URL"
+          RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: text/plain" \
             --data "${CONTENT}" \
-            "https://graph.microsoft.com/v1.0/users/${TARGET_UPN}/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content")
-          echo "$RES" | jq -r '.id, .name'
+            "$URL")
+          echo "::endgroup::"
+
+          HTTP_CODE=$(echo "$RESP" | tail -n1)
+          BODY=$(echo "$RESP" | sed '$d')
+          echo "Upload HTTP_CODE: $HTTP_CODE"
+          echo "Upload BODY (truncated):"
+          echo "$BODY" | head -c 800; echo
+
+          if [ "$HTTP_CODE" -ge 300 ]; then
+            echo "Upload failed (HTTP $HTTP_CODE)."
+            # 额外打印错误细节
+            ERR=$(echo "$BODY" | jq -r '.error.code // empty')
+            MSG=$(echo "$BODY" | jq -r '.error.message // empty')
+            [ -n "$ERR$MSG" ] && { echo "graph_error: $ERR"; echo "message: $MSG"; }
+            exit 1
+          fi
+
+          echo "OK: $(echo "$BODY" | jq -r '.id, .name')"
