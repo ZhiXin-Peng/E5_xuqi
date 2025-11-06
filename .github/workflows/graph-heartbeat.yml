@@ -1,4 +1,4 @@
-name: "Graph Heartbeat (OIDC - Dev Reads + Write + Summary)"
+name: "E5 Dev Activity (OIDC + Build + OneDrive + Teams)"
 
 on:
   push:
@@ -11,22 +11,75 @@ jobs:
   heartbeat:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write            # OIDC 必需
+      id-token: write
       contents: read
+
+    env:
+      # 基本参数（按需修改）
+      UPN: "pzx@wzhmk.onmicrosoft.com"             # 目标 OneDrive 用户
+      TENANT_ID: "e77be010-7134-4688-b3a1-63ebbdaafe4c"
+      CLIENT_ID: "da2d13f6-c585-4e42-8846-d182c26d6ef3"
+
+      # 构建参数（示例为 Node；若非 Node 请改 BUILD_COMMAND 与 BUILD_OUTPUT_PATH）
+      BUILD_COMMAND: "npm ci && npm run build"
+      BUILD_OUTPUT_PATH: "dist"
+      ARTIFACT_NAME: "build-output"
+
+      # 你的 Teams Webhook（按你提供的 URL 写死；推荐后续放到 Secret）
+      TEAMS_WEBHOOK_URL: "https://wzhmk.webhook.office.com/webhookb2/6508d725-573a-4733-947d-a9cad095b53e@e77be010-7134-4688-b3a1-63ebbdaafe4c/IncomingWebhook/d10988c901f94ce6a9019626e1067528/868f8e01-61d3-4170-ae9d-aa301c782b7a/V2b4kxka0UIt78iSavnuZIwU8-9NOCvvjDqQG72UN_Ggk1"
 
     steps:
       - name: "Checkout"
         uses: actions/checkout@v4
 
-      # --- OIDC 登录（无密钥） ---
+      # ---------- 可选：安装 Node（如不是 Node 项目可删除这两步并改 BUILD_COMMAND） ----------
+      - name: "Setup Node (optional)"
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18"
+
+      - name: "Build project"
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f package.json ]; then
+            echo "Detected Node project. Running: ${BUILD_COMMAND}"
+            bash -lc "${BUILD_COMMAND}"
+          else
+            echo "No package.json found. Skipping build (customize BUILD_COMMAND if needed)."
+          fi
+          mkdir -p "${BUILD_OUTPUT_PATH}"
+          echo "build-run: $(date -u)" > "${BUILD_OUTPUT_PATH}/_build_info.txt"
+
+      # ---------- 打包构建产物 ----------
+      - name: "Pack build output"
+        id: pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          TS=$(date -u +"%Y%m%d-%H%M%S")
+          ZIP="build-${TS}.zip"
+          (cd "${BUILD_OUTPUT_PATH}" && zip -rq "../${ZIP}" .)
+          echo "zip_name=${ZIP}" >> "$GITHUB_OUTPUT"
+
+      # ---------- 上传到 GitHub Artifacts ----------
+      - name: "Upload artifact to GitHub"
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ steps.pack.outputs.zip_name }}
+          if-no-files-found: error
+          retention-days: 14
+
+      # ---------- OIDC 登录 Azure（无密钥） ----------
       - name: "Azure login with OIDC"
         uses: azure/login@v2
         with:
-          client-id: da2d13f6-c585-4e42-8846-d182c26d6ef3     # 你的应用程序 ID
-          tenant-id: e77be010-7134-4688-b3a1-63ebbdaafe4c     # 你的租户 ID
+          client-id: ${{ env.CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
           allow-no-subscriptions: true
 
-      # --- 获取 Graph 令牌 ---
+      # ---------- 获取 Graph 访问令牌 ----------
       - name: "Acquire Microsoft Graph token"
         id: graphtoken
         shell: bash
@@ -36,121 +89,130 @@ jobs:
           test -n "$AZ_TOKEN" || { echo "Failed to acquire Microsoft Graph token"; exit 1; }
           echo "token=$AZ_TOKEN" >> "$GITHUB_OUTPUT"
 
-      # --- 读 1：驱动器信息与配额（app-only 可用） ---
-      - name: "Read Drive info and quota"
-        id: read_drive
+      # ---------- 读：驱动器配额 ----------
+      - name: "Read Drive quota"
+        id: read_quota
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
+          UPN:   ${{ env.UPN }}
         shell: bash
         run: |
           set -euo pipefail
-          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive)
+          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "https://graph.microsoft.com/v1.0/users/${UPN}/drive")
           USED=$(echo "$RESP"  | jq -r '.quota.used')
           TOTAL=$(echo "$RESP" | jq -r '.quota.total')
           echo "quota_used=${USED:-0}"   >> "$GITHUB_OUTPUT"
           echo "quota_total=${TOTAL:-0}" >> "$GITHUB_OUTPUT"
           echo "Drive quota: used=${USED:-0}, total=${TOTAL:-0}"
 
-      # --- 读 2：最近修改的文件（children + $orderby，兼容 app-only） ---
-      - name: "Read most recently modified items"
-        id: read_recent
+      # ---------- 把构建 ZIP 上传到 OneDrive /Builds ----------
+      - name: "Upload build ZIP to OneDrive"
+        id: upload_zip
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
+          UPN:   ${{ env.UPN }}
+          ZIP:   ${{ steps.pack.outputs.zip_name }}
         shell: bash
         run: |
           set -euo pipefail
-          URL="https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root/children?\$orderby=lastModifiedDateTime%20desc&\$top=10"
-          RESP=$(curl -sS -w "\n%{http_code}" -H "Authorization: Bearer ${TOKEN}" "$URL")
+          URL="https://graph.microsoft.com/v1.0/users/${UPN}/drive/root:/Builds/${ZIP}:/content"
+          RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
+            -H "Authorization: Bearer ${TOKEN}" \
+            -H "Content-Type: application/zip" \
+            --data-binary "@${ZIP}" \
+            "${URL}")
           CODE=$(echo "$RESP" | tail -n1)
-          BODY=$(echo "$RESP" | sed '$d')
+          echo "zip_http_code=$CODE" >> "$GITHUB_OUTPUT"
+          [ "$CODE" -lt 300 ] || { echo "Upload ZIP failed with HTTP $CODE"; exit 1; }
 
-          echo "HTTP_CODE: $CODE"
-          if [ "$CODE" -ge 300 ]; then
-            echo "List failed. Body (truncated):"
-            echo "$BODY" | head -c 600; echo
-            echo "recent_count=0" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "$BODY" | jq -r '(.value // []) | .[] | [.name, .lastModifiedDateTime] | @tsv' | head -n 10
-          COUNT=$(echo "$BODY" | jq -r '(.value // []) | length')
-          echo "recent_count=${COUNT:-0}" >> "$GITHUB_OUTPUT"
-
-      # --- 读 3：增量变更（/delta，健壮处理） ---
-      - name: "Read delta (changes)"
-        id: read_delta
+      # ---------- 写：运行日志到 OneDrive /Dev-Logs ----------
+      - name: "Append run log to OneDrive"
+        id: run_log
         env:
-          TOKEN: ${{ steps.graphtoken.outputs.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          RESP=$(curl -sS -H "Authorization: Bearer ${TOKEN}" "https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root/delta?top=10")
-          CHG=$(echo "$RESP" | jq -r '(.value // []) | length')
-          DLT=$(echo "$RESP" | jq -r '."@odata.deltaLink" // empty')
-          echo "delta_changes=${CHG:-0}" >> "$GITHUB_OUTPUT"
-          if [ -n "$DLT" ]; then
-            echo "delta_token_prefix=$(echo "$DLT" | head -c 48)" >> "$GITHUB_OUTPUT"
-            echo "Delta token prefix: $(echo "$DLT" | head -c 96)…"
-          else
-            echo "No delta token returned."
-          fi
-
-      # --- 写：上传心跳文件（把读到的指标写入内容） ---
-      - name: "Write heartbeat file to OneDrive"
-        id: write
-        env:
-          TOKEN:       ${{ steps.graphtoken.outputs.token }}
-          QUOTA_USED:  ${{ steps.read_drive.outputs.quota_used }}
-          QUOTA_TOTAL: ${{ steps.read_drive.outputs.quota_total }}
-          RECENT_CNT:  ${{ steps.read_recent.outputs.recent_count }}
+          TOKEN:      ${{ steps.graphtoken.outputs.token }}
+          UPN:        ${{ env.UPN }}
+          ZIP_NAME:   ${{ steps.pack.outputs.zip_name }}
+          QUOTA_USED: ${{ steps.read_quota.outputs.quota_used }}
+          QUOTA_TOT:  ${{ steps.read_quota.outputs.quota_total }}
         shell: bash
         run: |
           set -euo pipefail
           TS=$(date -u +"%Y%m%d-%H%M%S")
-          FILENAME="heartbeat-${TS}.txt"
-          CONTENT=$'GitHub OIDC heartbeat\n'"timestamp=${TS}\ncommit=${GITHUB_SHA}\nrecent_count=${RECENT_CNT:-0}\nquota_used=${QUOTA_USED:-0}\nquota_total=${QUOTA_TOTAL:-0}"
-          URL="https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root:/Dev-Heartbeat/${FILENAME}:/content"
-
+          LOGFILE="log-${TS}.txt"
+          CONTENT=$'E5 Dev Activity Log\n'"timestamp=${TS}\ncommit=${GITHUB_SHA}\nzip=${ZIP_NAME}\nquota_used=${QUOTA_USED:-0}\nquota_total=${QUOTA_TOT:-0}"
+          URL="https://graph.microsoft.com/v1.0/users/${UPN}/drive/root:/Dev-Logs/${LOGFILE}:/content"
           RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: text/plain" \
             --data "${CONTENT}" \
             "${URL}")
+          CODE=$(echo "$RESP" | tail -n1)
+          echo "log_http_code=$CODE" >> "$GITHUB_OUTPUT"
+          [ "$CODE" -lt 300 ] || { echo "Upload log failed with HTTP $CODE"; exit 1; }
 
-          CODE=$(echo "$RESP" | tail -n 1)
-          echo "filename=$FILENAME" >> "$GITHUB_OUTPUT"
-          echo "http_code=$CODE"    >> "$GITHUB_OUTPUT"
-          [ "$CODE" -lt 300 ] || { echo "Upload failed with HTTP $CODE"; exit 1; }
+      # ---------- Teams 通知（使用你提供的 Webhook URL） ----------
+      - name: "Notify Teams"
+        if: always()   # 失败也通知
+        env:
+          TEAMS_WEBHOOK_URL: ${{ env.TEAMS_WEBHOOK_URL }}
+          RUN_URL: "https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          ZIP_NAME: ${{ steps.pack.outputs.zip_name }}
+          ZIP_CODE: ${{ steps.upload_zip.outputs.zip_http_code }}
+          LOG_CODE: ${{ steps.run_log.outputs.log_http_code }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -z "${TEAMS_WEBHOOK_URL:-}" ]; then
+            echo "TEAMS_WEBHOOK_URL empty; skip."
+            exit 0
+          fi
+          STATUS="Succeeded"
+          if [ "${{ job.status }}" != "success" ]; then
+            STATUS="Failed"
+          fi
+          # 简洁 MessageCard（兼容 Incoming Webhook）
+          PAYLOAD=$(jq -n \
+            --arg title "E5 Dev Activity: $STATUS" \
+            --arg run   "$RUN_URL" \
+            --arg zip   "$ZIP_NAME" \
+            --arg zc    "${ZIP_CODE:-n/a}" \
+            --arg lc    "${LOG_CODE:-n/a}" \
+            '{ "@type":"MessageCard", "@context":"https://schema.org/extensions",
+               "summary": $title,
+               "themeColor": ( $title | contains("Failed") ? "E81123" : "2EB886"),
+               "title": $title,
+               "sections":[
+                 { "facts":[
+                     {"name":"Run","value":$run},
+                     {"name":"Artifact","value":$zip},
+                     {"name":"ZIP HTTP","value":$zc},
+                     {"name":"LOG HTTP","value":$lc}
+                   ]}
+               ] }')
+          curl -sS -H "Content-Type: application/json" -d "$PAYLOAD" "${TEAMS_WEBHOOK_URL}" -o /dev/null
 
-      # --- 摘要：写入 GitHub Step Summary（安全 printf） ---
+      # ---------- 汇总摘要 ----------
       - name: "Post run summary"
         env:
-          QUOTA_USED:   ${{ steps.read_drive.outputs.quota_used }}
-          QUOTA_TOTAL:  ${{ steps.read_drive.outputs.quota_total }}
-          RECENT_CNT:   ${{ steps.read_recent.outputs.recent_count }}
-          DELTA_CHG:    ${{ steps.read_delta.outputs.delta_changes }}
-          DELTA_PREFIX: ${{ steps.read_delta.outputs.delta_token_prefix }}
-          FILE_NAME:    ${{ steps.write.outputs.filename }}
-          HTTP_CODE:    ${{ steps.write.outputs.http_code }}
+          ZIP_NAME:   ${{ steps.pack.outputs.zip_name }}
+          ZIP_CODE:   ${{ steps.upload_zip.outputs.zip_http_code }}
+          LOG_CODE:   ${{ steps.run_log.outputs.log_http_code }}
+          QUOTA_USED: ${{ steps.read_quota.outputs.quota_used }}
+          QUOTA_TOT:  ${{ steps.read_quota.outputs.quota_total }}
         shell: bash
         run: |
           set -euo pipefail
           NOW_UTC=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          if [ -n "${HTTP_CODE:-}" ] && [ "${HTTP_CODE}" -lt 300 ]; then
-            STATUS="✅ Success"
-          else
+          STATUS="✅ Success"
+          if [ "${{ job.status }}" != "success" ]; then
             STATUS="❌ Failure"
           fi
-
           {
-            printf '## Graph Heartbeat Summary (Dev Reads + Write)\n\n'
+            printf '## E5 Dev Activity Summary\n\n'
             printf -- '- **Run time**: %s\n' "${NOW_UTC}"
-            printf -- '- **Drive quota**: used=%s total=%s\n' "${QUOTA_USED:-0}" "${QUOTA_TOTAL:-0}"
-            printf -- '- **Recent files count**: %s\n' "${RECENT_CNT:-0}"
-            printf -- '- **Delta changes (top)**: %s\n' "${DELTA_CHG:-0}"
-            printf -- '- **Delta token prefix**: %s\n' "${DELTA_PREFIX:-(n/a)}"
-            printf -- '- **Uploaded**: %s\n' "${FILE_NAME:-(unknown)}"
-            printf -- '- **HTTP code**: %s\n' "${HTTP_CODE:-(n/a)}"
-            printf -- '- **Result**: %s\n\n' "${STATUS}"
-            printf -- '> Performed 3 read ops (drive info, ordered children, delta) and 1 write op (upload heartbeat) via Microsoft Graph.\n'
+            printf -- '- **Artifact**: %s\n' "${ZIP_NAME}"
+            printf -- '- **OneDrive /Builds HTTP**: %s\n' "${ZIP_CODE:-n/a}"
+            printf -- '- **OneDrive /Dev-Logs HTTP**: %s\n' "${LOG_CODE:-n/a}"
+            printf -- '- **Drive quota**: used=%s total=%s\n' "${QUOTA_USED:-0}" "${QUOTA_TOT:-0}"
+            printf -- '- **Result**: %s\n' "${STATUS}"
           } >> "$GITHUB_STEP_SUMMARY"
