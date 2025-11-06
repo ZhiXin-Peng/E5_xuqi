@@ -1,47 +1,63 @@
-name: Graph Heartbeat (OIDC)
+name: Graph Heartbeat (OIDC - E5 Renewal)
 
 on:
   push:
-    branches: [ main ]         # 改成你实际分支
+    branches: [ main ]           # 提交时触发
   schedule:
-    - cron: "11 3 * * 1"       # 每周一定时(UTC)；可改
-  workflow_dispatch: {}
+    - cron: "7 2 * * 1"          # 每周一 02:07 UTC 定时触发（北京时间早上10:07）
+  workflow_dispatch: {}           # 手动触发
 
 jobs:
   heartbeat:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write           # 必须：OIDC
+      id-token: write            # ★ OIDC 必需
       contents: read
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Azure login with OIDC
         uses: azure/login@v2
         with:
-          client-id: ${{ secrets.CLIENT_ID }}
-          tenant-id: ${{ secrets.TENANT_ID }}
+          client-id: da2d13f6-c585-4e42-8846-d182c26d6ef3
+          tenant-id: e77be010-7134-4688-b3a1-63ebbdaafe4c
           allow-no-subscriptions: true
 
-      - name: Acquire Graph token via Azure CLI
+      - name: Acquire Microsoft Graph token
         id: graphtoken
         run: |
           set -euo pipefail
+          echo "Requesting Microsoft Graph token via OIDC..."
           AZ_TOKEN=$(az account get-access-token --resource-type ms-graph --query accessToken -o tsv)
-          test -n "$AZ_TOKEN" || { echo "Failed to get Graph token via OIDC"; exit 1; }
+          if [ -z "$AZ_TOKEN" ]; then
+            echo "❌ Failed to acquire Microsoft Graph token"
+            exit 1
+          fi
+          echo "✅ Token acquired successfully"
           echo "token=$AZ_TOKEN" >> "$GITHUB_OUTPUT"
 
-      - name: PUT heartbeat to OneDrive
+      - name: PUT heartbeat to OneDrive (E5 Renewal)
         env:
           TOKEN: ${{ steps.graphtoken.outputs.token }}
-          TARGET_UPN: ${{ secrets.TARGET_UPN }}
         run: |
           set -euo pipefail
           TS=$(date -u +"%Y%m%d-%H%M%S")
           CONTENT="GitHub OIDC heartbeat at ${TS} (commit ${GITHUB_SHA})"
-          RES=$(curl -sS -X PUT \
+          URL="https://graph.microsoft.com/v1.0/users/pzx@wzhmk.onmicrosoft.com/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content"
+          echo "Uploading heartbeat file to OneDrive..."
+          RESP=$(curl -sS -w "\n%{http_code}" -X PUT \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: text/plain" \
             --data "${CONTENT}" \
-            "https://graph.microsoft.com/v1.0/users/${TARGET_UPN}/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content")
-          echo "$RES" | jq -r '.id, .name'
+            "$URL")
+          CODE=$(echo "$RESP" | tail -n1)
+          BODY=$(echo "$RESP" | sed '$d')
+          echo "HTTP_CODE: $CODE"
+          echo "$BODY" | head -c 600; echo
+          if [ "$CODE" -lt 300 ]; then
+            echo "✅ Upload succeeded. Heartbeat file created."
+          else
+            echo "❌ Upload failed. Check error above."
+            exit 1
+          fi
