@@ -1,11 +1,11 @@
-name: Graph Heartbeat
+name: Graph Heartbeat (Client Secret)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main ]        # 提交到 main 时触发
   schedule:
-    - cron: "7 2 * * 1"   # 每周一 02:07 UTC 运行（北京时间约周一10:07；可改）
-  workflow_dispatch: {}    # 允许手动触发
+    - cron: "7 2 * * 1"       # 每周一 02:07 UTC 定时触发（可改）
+  workflow_dispatch: {}        # 允许手动触发
 
 jobs:
   heartbeat:
@@ -14,32 +14,52 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Get Graph token (client credentials)
+      # 取得 Graph 访问令牌（鲁棒版，自动 URL 编码 & 打印错误原因）
+      - name: Get Graph token (client credentials, robust)
         id: token
         env:
           TENANT_ID: ${{ secrets.TENANT_ID }}
           CLIENT_ID: ${{ secrets.CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CLIENT_SECRET }}
         run: |
-          TOKEN=$(curl -s -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d "client_id=${CLIENT_ID}&scope=https%3A%2F%2Fgraph.microsoft.com%2F.default&client_secret=${CLIENT_SECRET}&grant_type=client_credentials" \
-            | jq -r .access_token)
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "Failed to acquire token"; exit 1
-          fi
-          echo "token=$TOKEN" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          test -n "${TENANT_ID}" || { echo "TENANT_ID is empty"; exit 1; }
+          test -n "${CLIENT_ID}" || { echo "CLIENT_ID is empty"; exit 1; }
+          test -n "${CLIENT_SECRET}" || { echo "CLIENT_SECRET is empty"; exit 1; }
 
+          RESP=$(curl -sS -X POST "https://login.microsoftonline.com/${TENANT_ID}/oauth2/v2.0/token" \
+            -H "Content-Type: application/x-www-form-urlencoded" \
+            --data-urlencode "client_id=${CLIENT_ID}" \
+            --data-urlencode "client_secret=${CLIENT_SECRET}" \
+            --data-urlencode "scope=https://graph.microsoft.com/.default" \
+            --data-urlencode "grant_type=client_credentials" || true)
+
+          echo "Raw token endpoint response (truncated):"
+          echo "$RESP" | head -c 400; echo
+
+          TOKEN=$(echo "$RESP" | jq -r '.access_token // empty')
+          if [ -z "$TOKEN" ]; then
+            ERR=$(echo "$RESP" | jq -r '.error // empty')
+            DESC=$(echo "$RESP" | jq -r '.error_description // empty')
+            echo "Failed to acquire token."
+            [ -n "$ERR$DESC" ] && { echo "error: $ERR"; echo "error_description: $DESC"; }
+            exit 1
+          fi
+
+          echo "token=$TOKEN" >> "$GITHUB_OUTPUT"
+
+      # 往 OneDrive 写入心跳文件（自动创建 /Dev-Heartbeat/ 目录）
       - name: Upload heartbeat file to OneDrive via Graph
         env:
           TOKEN: ${{ steps.token.outputs.token }}
-          TARGET_UPN: ${{ secrets.TARGET_UPN }}   # 例如 you@xxx.onmicrosoft.com
+          TARGET_UPN: ${{ secrets.TARGET_UPN }}   # 形如 you@yourtenant.onmicrosoft.com
         run: |
+          set -euo pipefail
           TS=$(date -u +"%Y%m%d-%H%M%S")
           CONTENT="GitHub heartbeat at ${TS} (commit ${GITHUB_SHA})"
-          curl -sS -X PUT \
+          RES=$(curl -sS -X PUT \
             -H "Authorization: Bearer ${TOKEN}" \
             -H "Content-Type: text/plain" \
             --data "${CONTENT}" \
-            "https://graph.microsoft.com/v1.0/users/${TARGET_UPN}/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content" \
-            | jq '.id, .name' -r
+            "https://graph.microsoft.com/v1.0/users/${TARGET_UPN}/drive/root:/Dev-Heartbeat/heartbeat-${TS}.txt:/content")
+          echo "$RES" | jq -r '.id, .name'
