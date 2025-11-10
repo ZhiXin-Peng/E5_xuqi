@@ -14,5 +14,5 @@ export async function run() {
   const options = { coercionType: Office.CoercionType.Text };
 
   await Office.context.document.setSelectedDataAsync(" ", options);
-  await Office.context.document.setSelectedDataAsync("hello hello", options);
+  await Office.context.document.setSelectedDataAsync("hello hello 测试测试", options);
 }

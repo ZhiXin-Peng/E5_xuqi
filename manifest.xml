@@ -1,85 +1,151 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<OfficeApp xmlns="http://schemas.microsoft.com/office/appforoffice/1.1" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0" xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="TaskPaneApp">
+<!--
+  Office 加载项 Manifest（PowerPoint 任务窗格示例）
+  说明：
+  1) 仅添加注释，不改动任何实际功能与行为；
+  2) 所有 URL、ID、资源键、权限均与原版一致；
+  3) 如需上线，请将 localhost 改为正式域名并配置 HTTPS 证书。
+-->
+
+<OfficeApp
+  xmlns="http://schemas.microsoft.com/office/appforoffice/1.1"
+  xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+  xmlns:bt="http://schemas.microsoft.com/office/officeappbasictypes/1.0"
+  xmlns:ov="http://schemas.microsoft.com/office/taskpaneappversionoverrides"
+  xsi:type="TaskPaneApp"
+>
+  <!-- 唯一标识（GUID）。发布到商店或企业部署时必须保持稳定不变 -->
   <Id>ff4fa95c-719f-458f-aff7-689f6f74c110</Id>
+
+  <!-- 加载项版本号：用于更新控制，遵循 X.Y.Z.B 的惯例 -->
   <Version>1.0.0.0</Version>
+
+  <!-- 供应商名称（组织或公司名） -->
   <ProviderName>Contoso</ProviderName>
+
+  <!-- 默认语言区域，用于 DisplayName/Description 的 DefaultValue 解释 -->
   <DefaultLocale>en-US</DefaultLocale>
+
+  <!-- 加载项名称与描述（可在 Resources 中做多语言） -->
   <DisplayName DefaultValue="E5_xuqi"/>
   <Description DefaultValue="A template to get started."/>
+
+  <!-- 办公商店/客户端显示的图标（32/64 为列表和高分屏） -->
   <IconUrl DefaultValue="https://localhost:3000/assets/icon-32.png"/>
   <HighResolutionIconUrl DefaultValue="https://localhost:3000/assets/icon-64.png"/>
+
+  <!-- 帮助/支持链接（建议指向文档或工单入口） -->
   <SupportUrl DefaultValue="https://www.contoso.com/help"/>
+
+  <!-- 允许的外部域：前端或后端需要访问的顶级域名（生产记得添加正式域名） -->
   <AppDomains>
     <AppDomain>https://www.contoso.com</AppDomain>
   </AppDomains>
+
+  <!-- 支持的宿主应用：此示例面向 PowerPoint（Presentation） -->
   <Hosts>
     <Host Name="Presentation"/>
   </Hosts>
+
+  <!-- 默认入口页面：任务窗格 HTML（需可被 Office 客户端访问） -->
   <DefaultSettings>
     <SourceLocation DefaultValue="https://localhost:3000/taskpane.html"/>
   </DefaultSettings>
+
+  <!-- 权限级别：ReadWriteDocument 允许读写当前文档 -->
   <Permissions>ReadWriteDocument</Permissions>
-  <VersionOverrides xmlns="http://schemas.microsoft.com/office/taskpaneappversionoverrides" xsi:type="VersionOverridesV1_0">
-    <Hosts>
-      <Host xsi:type="Presentation">
-        <DesktopFormFactor>
-          <GetStarted>
-            <Title resid="GetStarted.Title"/>
-            <Description resid="GetStarted.Description"/>
-            <LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
-          </GetStarted>
-          <FunctionFile resid="Commands.Url"/>
-          <ExtensionPoint xsi:type="PrimaryCommandSurface">
-            <OfficeTab id="TabHome">
-              <Group id="CommandsGroup">
-                <Label resid="CommandsGroup.Label"/>
-                <Icon>
+
+  <!--
+    VersionOverrides：为特定宿主和平台定义命令（功能区按钮）、启动体验等。
+    采用 ov: 命名空间前缀，等价于原始写法，仅更清晰。
+  -->
+  <ov:VersionOverrides xsi:type="VersionOverridesV1_0">
+    <ov:Hosts>
+      <!-- 仅对 PowerPoint 生效的覆盖项 -->
+      <ov:Host xsi:type="Presentation">
+        <ov:DesktopFormFactor>
+          <!-- 首次使用时的“开始体验”指引（使用资源字符串） -->
+          <ov:GetStarted>
+            <ov:Title resid="GetStarted.Title"/>
+            <ov:Description resid="GetStarted.Description"/>
+            <ov:LearnMoreUrl resid="GetStarted.LearnMoreUrl"/>
+          </ov:GetStarted>
+
+          <!-- commands.html：命令函数文件（无需变更即可使用） -->
+          <ov:FunctionFile resid="Commands.Url"/>
+
+          <!-- 主功能区命令：在“主页”选项卡添加一个分组和按钮 -->
+          <ov:ExtensionPoint xsi:type="PrimaryCommandSurface">
+            <ov:OfficeTab id="TabHome">
+              <ov:Group id="CommandsGroup">
+                <ov:Label resid="CommandsGroup.Label"/>
+                <ov:Icon>
+                  <!-- 功能区分辨率下的图标集 -->
                   <bt:Image size="16" resid="Icon.16x16"/>
                   <bt:Image size="32" resid="Icon.32x32"/>
                   <bt:Image size="80" resid="Icon.80x80"/>
-                </Icon>
-                <Control xsi:type="Button" id="TaskpaneButton">
-                  <Label resid="TaskpaneButton.Label"/>
-                  <Supertip>
-                    <Title resid="TaskpaneButton.Label"/>
-                    <Description resid="TaskpaneButton.Tooltip"/>
-                  </Supertip>
-                  <Icon>
+                </ov:Icon>
+
+                <!-- “显示任务窗格”按钮：点击后打开 taskpane.html -->
+                <ov:Control xsi:type="Button" id="TaskpaneButton">
+                  <ov:Label resid="TaskpaneButton.Label"/>
+                  <ov:Supertip>
+                    <!-- 悬浮提示（标题+描述） -->
+                    <ov:Title resid="TaskpaneButton.Label"/>
+                    <ov:Description resid="TaskpaneButton.Tooltip"/>
+                  </ov:Supertip>
+                  <ov:Icon>
                     <bt:Image size="16" resid="Icon.16x16"/>
                     <bt:Image size="32" resid="Icon.32x32"/>
                     <bt:Image size="80" resid="Icon.80x80"/>
-                  </Icon>
-                  <Action xsi:type="ShowTaskpane">
-                    <TaskpaneId>ButtonId1</TaskpaneId>
-                    <SourceLocation resid="Taskpane.Url"/>
-                  </Action>
-                </Control>
-              </Group>
-            </OfficeTab>
-          </ExtensionPoint>
-        </DesktopFormFactor>
-      </Host>
-    </Hosts>
-    <Resources>
+                  </ov:Icon>
+
+                  <!-- 打开任务窗格的动作。TaskpaneId 可用于多窗格区分 -->
+                  <ov:Action xsi:type="ShowTaskpane">
+                    <ov:TaskpaneId>ButtonId1</ov:TaskpaneId>
+                    <!-- 指向资源中的 Taskpane.Url -->
+                    <ov:SourceLocation resid="Taskpane.Url"/>
+                  </ov:Action>
+                </ov:Control>
+              </ov:Group>
+            </ov:OfficeTab>
+          </ov:ExtensionPoint>
+        </ov:DesktopFormFactor>
+      </ov:Host>
+    </ov:Hosts>
+
+    <!-- 统一的资源声明：图像、URL、短字符串、长字符串 -->
+    <ov:Resources>
+      <!-- 图标资源（不同像素用于不同 UI 场景） -->
       <bt:Images>
         <bt:Image id="Icon.16x16" DefaultValue="https://localhost:3000/assets/icon-16.png"/>
         <bt:Image id="Icon.32x32" DefaultValue="https://localhost:3000/assets/icon-32.png"/>
         <bt:Image id="Icon.80x80" DefaultValue="https://localhost:3000/assets/icon-80.png"/>
       </bt:Images>
+
+      <!-- URL 资源：命令页面、任务窗格页面、了解更多链接 -->
       <bt:Urls>
+        <!-- 微软官方“了解更多”链接，可替换为团队文档 -->
         <bt:Url id="GetStarted.LearnMoreUrl" DefaultValue="https://go.microsoft.com/fwlink/?LinkId=276812"/>
         <bt:Url id="Commands.Url" DefaultValue="https://localhost:3000/commands.html"/>
         <bt:Url id="Taskpane.Url" DefaultValue="https://localhost:3000/taskpane.html"/>
       </bt:Urls>
+
+      <!-- 短字符串：用于分组/按钮的标题等 -->
       <bt:ShortStrings>
         <bt:String id="GetStarted.Title" DefaultValue="Get started with your sample add-in!"/>
         <bt:String id="CommandsGroup.Label" DefaultValue="Commands Group"/>
         <bt:String id="TaskpaneButton.Label" DefaultValue="Show Task Pane"/>
       </bt:ShortStrings>
+
+      <!-- 长字符串：用于较长描述和工具提示 -->
       <bt:LongStrings>
-        <bt:String id="GetStarted.Description" DefaultValue="Your sample add-in loaded successfully. Go to the HOME tab and click the 'Show Task Pane' button to get started."/>
+        <bt:String
+          id="GetStarted.Description"
+          DefaultValue="Your sample add-in loaded successfully. Go to the HOME tab and click the 'Show Task Pane' button to get started."
+        />
         <bt:String id="TaskpaneButton.Tooltip" DefaultValue="Click to Show a Taskpane"/>
       </bt:LongStrings>
-    </Resources>
-  </VersionOverrides>
+    </ov:Resources>
+  </ov:VersionOverrides>
 </OfficeApp>
